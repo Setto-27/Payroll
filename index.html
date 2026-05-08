@@ -1,0 +1,1495 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ระบบจัดการเงินเดือน</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  body { font-family: 'IBM Plex Sans Thai', system-ui, sans-serif; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.ptbl input { width: 100%; padding: 4px 6px; border: 1px solid transparent; border-radius: 4px; background: transparent; }
+  table.ptbl input:focus { outline: none; border-color: #3b82f6; background: white; }
+  table.ptbl input.num { text-align: right; }
+  table.ptbl td { padding: 0; border: 1px solid #e5e7eb; }
+  table.ptbl th { padding: 6px 8px; background: #f3f4f6; border: 1px solid #d1d5db; font-weight: 600; font-size: 12px; }
+  table.ptbl tr:hover td { background: #fafafa; }
+  table.ptbl tr.row-warn td { background: #fef9c3; }
+  table.ptbl tr.row-warn:hover td { background: #fef08a; }
+  /* Income / Deduction tint */
+  table.ptbl th.tint-green { background: #d1fae5 !important; color: #065f46; }
+  table.ptbl th.tint-red   { background: #fee2e2 !important; color: #991b1b; }
+  table.ptbl td.tint-green { background: #ecfdf5 !important; }
+  table.ptbl td.tint-red   { background: #fef2f2 !important; }
+  table.ptbl tr:hover td.tint-green { background: #d1fae5 !important; }
+  table.ptbl tr:hover td.tint-red   { background: #fee2e2 !important; }
+  .toast { position: fixed; bottom: 20px; right: 20px; padding: 12px 20px; border-radius: 8px; color: white; z-index: 9999; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+  .toast-ok { background: #10b981; }
+  .toast-err { background: #ef4444; }
+  .toast-info { background: #3b82f6; }
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 100; }
+  .spinner { display:inline-block; width:14px; height:14px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:spin 0.7s linear infinite; }
+  .pulse-dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#3b82f6; animation: pulse 1.2s infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes pulse { 0%,100%{opacity:0.4} 50%{opacity:1} }
+  @media print {
+    .no-print { display: none !important; }
+    .print-only { display: block !important; }
+    body { background: white; }
+    aside, header { display: none !important; }
+    main { margin: 0 !important; padding: 0 !important; }
+  }
+  .print-only { display: none; }
+  .slip { page-break-after: always; padding: 24px; border: 1px solid #ddd; margin-bottom: 16px; background: white; }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+
+<div class="flex min-h-screen">
+  <!-- Sidebar -->
+  <aside class="w-60 bg-slate-900 text-slate-200 flex-shrink-0 no-print">
+    <div class="p-5 border-b border-slate-700">
+      <div class="text-lg font-bold text-white">💰 Payroll</div>
+      <div class="text-xs text-slate-400 mt-1">ระบบจัดการเงินเดือน</div>
+    </div>
+    <nav class="p-3 space-y-1" id="nav">
+      <button data-page="dashboard" class="nav-btn w-full text-left px-4 py-2 rounded hover:bg-slate-800">📊 Dashboard</button>
+      <button data-page="employees" class="nav-btn w-full text-left px-4 py-2 rounded hover:bg-slate-800">👥 พนักงาน</button>
+      <button data-page="periods"   class="nav-btn w-full text-left px-4 py-2 rounded hover:bg-slate-800">📅 งวดเงินเดือน</button>
+      <button data-page="reports"   class="nav-btn w-full text-left px-4 py-2 rounded hover:bg-slate-800">📄 รายงาน</button>
+      <button data-page="settings"  class="nav-btn w-full text-left px-4 py-2 rounded hover:bg-slate-800">⚙️ ตั้งค่า</button>
+    </nav>
+    <div class="absolute bottom-0 w-60 p-4 text-xs text-slate-500 border-t border-slate-700">
+      <div id="connStatus">⚪ ยังไม่ได้เชื่อมต่อ</div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="flex-1 p-6 overflow-x-auto">
+    <div id="page-dashboard" class="page"></div>
+    <div id="page-employees" class="page hidden"></div>
+    <div id="page-periods"   class="page hidden"></div>
+    <div id="page-reports"   class="page hidden"></div>
+    <div id="page-settings"  class="page hidden"></div>
+  </main>
+</div>
+
+<div id="modalRoot"></div>
+<div id="toastRoot"></div>
+
+<script>
+// ====================== STATE & CONFIG ======================
+const STATE = {
+  webAppUrl: localStorage.getItem('payroll.webAppUrl') || '',
+  appPin:    localStorage.getItem('payroll.appPin') || '',
+  employees: [],
+  periods: [],
+  currentPage: 'dashboard',
+  currentPeriod: null,
+  currentEntries: [],
+  currentExtras: [],
+  loading: false,
+  refreshing: false
+};
+
+const GROUP_OPTIONS = [
+  { value: 'thai',    label: 'พนักงานไทย (รายวัน)' },
+  { value: 'foreign', label: 'พนักงานต่างด้าว (รายวัน)' },
+  { value: 'monthly', label: 'พนักงานเงินเดือนรายเดือน' }
+];
+
+const fmt = n => {
+  if (n === null || n === undefined || n === '') return '';
+  const num = Number(n);
+  if (!isFinite(num)) return '';
+  return num.toLocaleString('th-TH', { minimumFractionDigits: num % 1 ? 2 : 0, maximumFractionDigits: 2 });
+};
+const num = v => {
+  if (v === null || v === undefined || v === '') return 0;
+  const n = parseFloat(v);
+  return isFinite(n) ? n : 0;
+};
+const today = () => new Date().toISOString().slice(0, 10);
+
+// ====================== CACHE LAYER ======================
+// localStorage cache → load instant + refresh background
+function cacheGet(key, def = null) {
+  try {
+    const v = localStorage.getItem('payroll.cache.' + key);
+    return v ? JSON.parse(v) : def;
+  } catch (e) { return def; }
+}
+function cacheSet(key, data) {
+  try { localStorage.setItem('payroll.cache.' + key, JSON.stringify(data)); } catch (e) {}
+}
+function cacheClear() {
+  Object.keys(localStorage)
+    .filter(k => k.startsWith('payroll.cache.'))
+    .forEach(k => localStorage.removeItem(k));
+}
+
+// Load cached data into STATE (synchronous, instant)
+function loadFromCache() {
+  STATE.employees = cacheGet('employees', []) || [];
+  STATE.periods = cacheGet('periods', []) || [];
+}
+
+// Refresh from server in background, update cache + UI
+async function refreshAll(silent = false) {
+  if (!STATE.webAppUrl) return;
+  STATE.refreshing = true;
+  setRefreshIndicator(true);
+  try {
+    const [employees, periods] = await Promise.all([
+      api('listEmployees'),
+      api('listPeriods')
+    ]);
+    STATE.employees = employees || [];
+    STATE.periods = periods || [];
+    cacheSet('employees', STATE.employees);
+    cacheSet('periods', STATE.periods);
+    document.getElementById('connStatus').innerHTML = '🟢 เชื่อมต่อแล้ว';
+    rerenderCurrentPage();
+  } catch (e) {
+    if (!silent) toast('โหลดข้อมูลล้มเหลว: ' + e.message, 'err');
+    document.getElementById('connStatus').innerHTML = '🔴 ' + e.message.slice(0, 30);
+  } finally {
+    STATE.refreshing = false;
+    setRefreshIndicator(false);
+  }
+}
+
+function setRefreshIndicator(on) {
+  const el = document.getElementById('refreshIndicator');
+  if (el) el.style.display = on ? 'inline-block' : 'none';
+}
+
+function rerenderCurrentPage() {
+  // เรียก render ใหม่ของ page ปัจจุบัน เพื่อให้เห็น data ใหม่
+  if (STATE.currentPage === 'dashboard') renderDashboard();
+  else if (STATE.currentPage === 'employees') filterEmployees();
+  else if (STATE.currentPage === 'periods' && !STATE.currentPeriod) renderPeriodsList();
+  else if (STATE.currentPage === 'reports') {
+    const sel = document.getElementById('reportPeriod');
+    if (sel && STATE.periods.length && !sel.options.length) {
+      sel.innerHTML = STATE.periods.map(p => `<option value="${p.id}">${p.label}</option>`).join('');
+    }
+  }
+}
+
+// ====================== API ======================
+async function api(action, params = {}) {
+  if (!STATE.webAppUrl) throw new Error('ยังไม่ได้ตั้งค่า Web App URL — ไปที่หน้า "ตั้งค่า"');
+  const body = JSON.stringify(Object.assign({ action, pin: STATE.appPin }, params));
+  const res = await fetch(STATE.webAppUrl, {
+    method: 'POST',
+    body: body,
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    redirect: 'follow'
+  });
+  const json = await res.json();
+  if (!json.ok) throw new Error(json.error || 'API error');
+  return json.data;
+}
+
+// ====================== UI HELPERS ======================
+function toast(msg, type = 'ok') {
+  const el = document.createElement('div');
+  el.className = 'toast toast-' + type;
+  el.textContent = msg;
+  document.getElementById('toastRoot').appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+function modal(html) {
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `<div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-auto m-4">${html}</div>
+  </div>`;
+}
+function closeModal() { document.getElementById('modalRoot').innerHTML = ''; }
+
+function showPage(page) {
+  STATE.currentPage = page;
+  document.querySelectorAll('.page').forEach(p => p.classList.add('hidden'));
+  document.getElementById('page-' + page).classList.remove('hidden');
+  document.querySelectorAll('.nav-btn').forEach(b => {
+    b.classList.toggle('bg-slate-800', b.dataset.page === page);
+    b.classList.toggle('text-white', b.dataset.page === page);
+  });
+  if (page === 'dashboard') renderDashboard();
+  if (page === 'employees') renderEmployees();
+  if (page === 'periods')   renderPeriodsList();
+  if (page === 'reports')   renderReports();
+  if (page === 'settings')  renderSettings();
+}
+
+document.getElementById('nav').addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if (b) showPage(b.dataset.page);
+});
+
+// ====================== DASHBOARD ======================
+function renderDashboard() {
+  const root = document.getElementById('page-dashboard');
+  const indicator = STATE.refreshing ? '<span class="pulse-dot ml-2"></span>' : '';
+  root.innerHTML = `
+    <div class="mb-6 flex items-end justify-between">
+      <div>
+        <h1 class="text-2xl font-bold">Dashboard ${indicator}</h1>
+        <p class="text-slate-500 text-sm">ภาพรวมระบบเงินเดือน</p>
+      </div>
+      <button onclick="refreshAll()" class="text-sm text-blue-600">🔄 รีเฟรช</button>
+    </div>
+    <div id="dashStats" class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+      <div class="bg-white p-5 rounded-lg shadow-sm border">
+        <div class="text-xs text-slate-500">พนักงานทั้งหมด</div>
+        <div class="text-2xl font-bold mt-1">${STATE.employees.length}</div>
+      </div>
+      <div class="bg-white p-5 rounded-lg shadow-sm border">
+        <div class="text-xs text-slate-500">Active</div>
+        <div class="text-2xl font-bold mt-1 text-emerald-600">${STATE.employees.filter(e => isActive(e)).length}</div>
+      </div>
+      <div class="bg-white p-5 rounded-lg shadow-sm border">
+        <div class="text-xs text-slate-500">งวดทั้งหมด</div>
+        <div class="text-2xl font-bold mt-1">${STATE.periods.length}</div>
+      </div>
+      <div class="bg-white p-5 rounded-lg shadow-sm border">
+        <div class="text-xs text-slate-500">งวดล่าสุด</div>
+        <div class="text-lg font-bold mt-1 text-blue-600">${STATE.periods[0] ? STATE.periods[0].label : '—'}</div>
+      </div>
+    </div>
+
+    <div class="bg-white p-5 rounded-lg shadow-sm border">
+      <div class="font-semibold mb-3">งวดเงินเดือนล่าสุด</div>
+      <div id="dashRecent" class="text-sm">
+        ${STATE.periods.length ? `
+          <table class="w-full text-sm">
+            <thead><tr class="text-left text-xs text-slate-500 border-b">
+              <th class="py-2">งวด</th><th>วันจ่าย</th><th></th>
+            </tr></thead>
+            <tbody>
+              ${STATE.periods.slice(0, 8).map(p => `<tr class="border-b">
+                <td class="py-2">${p.label}</td>
+                <td>${p.pay_date ? new Date(p.pay_date).toLocaleDateString('th-TH') : '-'}</td>
+                <td class="text-right"><button class="text-blue-600 text-xs" onclick="openPeriod('${p.id}')">เปิด →</button></td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        ` : '<div class="text-slate-500">ยังไม่มีงวด — ไปที่ "งวดเงินเดือน" เพื่อสร้าง</div>'}
+      </div>
+    </div>
+    ${!STATE.webAppUrl ? '<div class="mt-4 p-4 bg-amber-50 border border-amber-200 rounded text-amber-800 text-sm">⚠ ยังไม่ได้ตั้งค่า Web App URL — ไปที่หน้า "ตั้งค่า"</div>' : ''}
+  `;
+}
+
+const isActive = e => e.active === true || e.active === 'TRUE' || e.active === 'true' || e.active === 1;
+
+// ====================== EMPLOYEES ======================
+function renderEmployees() {
+  const root = document.getElementById('page-employees');
+  root.innerHTML = `
+    <div class="flex items-center justify-between mb-6">
+      <div>
+        <h1 class="text-2xl font-bold">พนักงาน <span class="text-slate-400 text-sm font-normal">${STATE.employees.length} คน</span></h1>
+        <p class="text-slate-500 text-sm">รายชื่อ + default rate ของแต่ละคน</p>
+      </div>
+      <div class="flex gap-2">
+        <input id="empSearch" placeholder="ค้นหา..." class="px-3 py-2 border rounded text-sm" oninput="filterEmployees()">
+        <select id="empGroupFilter" class="px-3 py-2 border rounded text-sm" onchange="filterEmployees()">
+          <option value="">ทุกกลุ่ม</option>
+          ${GROUP_OPTIONS.map(g => `<option value="${g.value}">${g.label}</option>`).join('')}
+        </select>
+        <button onclick="openImportModal()" class="border border-blue-600 text-blue-600 px-4 py-2 rounded text-sm hover:bg-blue-50">📥 Import จาก Excel</button>
+        <button onclick="openEmployeeModal()" class="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">+ เพิ่มพนักงาน</button>
+      </div>
+    </div>
+    <div class="bg-white rounded-lg shadow-sm border overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-100 text-left text-xs">
+          <tr>
+            <th class="px-3 py-2">ชื่อ</th>
+            <th class="px-3 py-2">ชื่อเล่น</th>
+            <th class="px-3 py-2">กลุ่ม</th>
+            <th class="px-3 py-2 text-right">โกดัง/วัน</th>
+            <th class="px-3 py-2 text-right">หน้างาน/วัน</th>
+            <th class="px-3 py-2 text-right">ปกส.</th>
+            <th class="px-3 py-2 text-right">ปก.บริษัท</th>
+            <th class="px-3 py-2 text-right">ปก.สุขภาพ</th>
+            <th class="px-3 py-2 text-right">ทักษะพิเศษ</th>
+            <th class="px-3 py-2 text-center">Active</th>
+            <th class="px-3 py-2"></th>
+          </tr>
+        </thead>
+        <tbody id="empTbody"></tbody>
+      </table>
+    </div>
+  `;
+  filterEmployees();
+}
+
+function filterEmployees() {
+  const tbody = document.getElementById('empTbody');
+  if (!tbody) return;
+  const q = (document.getElementById('empSearch')?.value || '').toLowerCase();
+  const g = document.getElementById('empGroupFilter')?.value || '';
+  const list = STATE.employees.filter(e => {
+    if (g && e.group !== g) return false;
+    if (q && !((e.name || '') + ' ' + (e.nickname || '') + ' ' + (e.code || '')).toLowerCase().includes(q)) return false;
+    return true;
+  });
+  if (!list.length) {
+    tbody.innerHTML = '<tr><td colspan="11" class="text-center py-8 text-slate-400">ไม่มีข้อมูล</td></tr>';
+    return;
+  }
+  tbody.innerHTML = list.map(e => `
+    <tr class="border-t hover:bg-slate-50">
+      <td class="px-3 py-2">${e.name || ''}</td>
+      <td class="px-3 py-2 text-slate-500">${e.nickname || ''}</td>
+      <td class="px-3 py-2"><span class="text-xs px-2 py-0.5 rounded ${groupBadge(e.group)}">${groupLabel(e.group)}</span></td>
+      <td class="px-3 py-2 num">${fmt(e.warehouse_rate)}</td>
+      <td class="px-3 py-2 num">${fmt(e.field_rate)}</td>
+      <td class="px-3 py-2 num">${fmt(e.social_security)}</td>
+      <td class="px-3 py-2 num">${fmt(e.company_insurance)}</td>
+      <td class="px-3 py-2 num">${fmt(e.health_insurance)}</td>
+      <td class="px-3 py-2 num">${fmt(e.skill_bonus_default)}</td>
+      <td class="px-3 py-2 text-center">${isActive(e) ? '✓' : '—'}</td>
+      <td class="px-3 py-2 text-right">
+        <button onclick="openEmployeeModal('${e.id}')" class="text-blue-600 text-xs">แก้ไข</button>
+        <button onclick="deleteEmp('${e.id}')" class="text-red-600 text-xs ml-2">ลบ</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+const groupLabel = g => (GROUP_OPTIONS.find(o => o.value === g) || { label: g || '-' }).label;
+const groupBadge = g => g === 'thai' ? 'bg-blue-100 text-blue-700' : g === 'foreign' ? 'bg-purple-100 text-purple-700' : g === 'monthly' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600';
+
+function openEmployeeModal(id) {
+  const e = id ? STATE.employees.find(x => x.id === id) : { group: 'foreign', warehouse_rate: 300, field_rate: 650, company_insurance: 250, health_insurance: 450, skill_bonus_default: 0, active: true };
+  modal(`
+    <div class="p-6">
+      <div class="flex justify-between items-center mb-4">
+        <h2 class="text-xl font-bold">${id ? 'แก้ไข' : 'เพิ่ม'}พนักงาน</h2>
+        <button onclick="closeModal()" class="text-slate-400">✕</button>
+      </div>
+      <form id="empForm" class="grid grid-cols-2 gap-4 text-sm">
+        ${field('name', 'ชื่อ-นามสกุล', e.name, 'col-span-2', 'required')}
+        ${field('nickname', 'ชื่อเล่น', e.nickname)}
+        ${field('code', 'รหัส', e.code)}
+        <div>
+          <label class="block text-xs text-slate-500 mb-1">กลุ่ม</label>
+          <select name="group" id="empGroupSelect" class="w-full border rounded px-3 py-2">
+            ${GROUP_OPTIONS.map(o => `<option value="${o.value}" ${e.group === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs text-slate-500 mb-1">Active</label>
+          <select name="active" class="w-full border rounded px-3 py-2">
+            <option value="true" ${isActive(e) ? 'selected' : ''}>ใช้งานอยู่</option>
+            <option value="false" ${!isActive(e) ? 'selected' : ''}>ปิดการใช้งาน</option>
+          </select>
+        </div>
+
+        <!-- Section: รายวัน (โผล่เฉพาะ thai/foreign) -->
+        <div id="dailySection" class="col-span-2 border-t pt-3 mt-1">
+          <div class="text-xs text-slate-500 font-semibold mb-3">ค่าแรงรายวัน</div>
+          <div class="grid grid-cols-2 gap-4">
+            ${field('warehouse_rate', 'ค่าแรงโกดัง / วัน (บาท)', e.warehouse_rate, '', 'type=number')}
+            ${field('field_rate', 'ค่าแรงหน้างาน / วัน (บาท)', e.field_rate, '', 'type=number')}
+          </div>
+        </div>
+
+        <!-- Section: รายเดือน (โผล่เฉพาะ monthly) -->
+        <div id="monthlySection" class="col-span-2 border-t pt-3 mt-1">
+          <div class="text-xs text-slate-500 font-semibold mb-3">เงินเดือนรายเดือน</div>
+          ${field('monthly_salary', 'เงินเดือน / งวด (บาท)', e.monthly_salary, '', 'type=number')}
+        </div>
+
+        <div class="col-span-2 border-t pt-3 mt-1 text-xs text-slate-500 font-semibold">ค่าหัก/เงินพิเศษ default</div>
+        ${field('company_insurance', 'ประกันบริษัท', e.company_insurance, '', 'type=number')}
+        ${field('social_security', 'ประกันสังคม', e.social_security, '', 'type=number')}
+        ${field('health_insurance', 'ประกันสุขภาพ', e.health_insurance, '', 'type=number')}
+        ${field('skill_bonus_default', 'ค่าทักษะพิเศษ', e.skill_bonus_default, '', 'type=number')}
+        ${field('note', 'หมายเหตุ', e.note, 'col-span-2')}
+
+        <div class="col-span-2 flex justify-end gap-2 pt-4 border-t">
+          <button type="button" onclick="closeModal()" class="px-4 py-2 border rounded">ยกเลิก</button>
+          <button type="submit" id="empSubmitBtn" class="px-4 py-2 bg-blue-600 text-white rounded">บันทึก</button>
+        </div>
+      </form>
+    </div>
+  `);
+
+  // toggle section ตามกลุ่มที่เลือก
+  const groupSel = document.getElementById('empGroupSelect');
+  const daily = document.getElementById('dailySection');
+  const monthly = document.getElementById('monthlySection');
+  function toggleSections() {
+    const isMonthly = groupSel.value === 'monthly';
+    daily.classList.toggle('hidden', isMonthly);
+    monthly.classList.toggle('hidden', !isMonthly);
+  }
+  groupSel.addEventListener('change', toggleSections);
+  toggleSections();
+  document.getElementById('empForm').addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const fd = new FormData(ev.target);
+    const obj = id ? Object.assign({}, e) : {};
+    fd.forEach((v, k) => {
+      if (['warehouse_rate', 'field_rate', 'monthly_salary', 'company_insurance', 'social_security', 'health_insurance', 'skill_bonus_default'].includes(k)) {
+        obj[k] = v === '' ? '' : num(v);
+      } else if (k === 'active') {
+        obj[k] = v === 'true';
+      } else {
+        obj[k] = v;
+      }
+    });
+    // ล้างฟิลด์ของกลุ่มที่ไม่ได้เลือก (กันค่าเก่าตกค้าง)
+    if (obj.group === 'monthly') {
+      obj.warehouse_rate = ''; obj.field_rate = '';
+    } else {
+      obj.monthly_salary = '';
+    }
+    if (id) obj.id = id;
+    const btn = document.getElementById('empSubmitBtn');
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> บันทึก...';
+    try {
+      const saved = await api('saveEmployee', { employee: obj });
+      // Update cache
+      if (id) {
+        const idx = STATE.employees.findIndex(x => x.id === id);
+        if (idx >= 0) STATE.employees[idx] = saved;
+      } else {
+        STATE.employees.push(saved);
+      }
+      cacheSet('employees', STATE.employees);
+      toast('บันทึกแล้ว');
+      closeModal();
+      filterEmployees();
+    } catch (err) {
+      toast(err.message, 'err');
+      btn.disabled = false; btn.innerHTML = 'บันทึก';
+    }
+  });
+}
+
+function field(name, label, value, extraClass = '', extra = '') {
+  const type = (extra.match(/type=(\w+)/) || [])[1] || 'text';
+  const step = (extra.match(/step=([\d.]+)/) || [])[1];
+  const required = extra.includes('required');
+  const v = value === undefined || value === null ? '' : value;
+  return `<div class="${extraClass}">
+    <label class="block text-xs text-slate-500 mb-1">${label}</label>
+    <input name="${name}" type="${type}" ${step ? `step="${step}"` : ''} ${required ? 'required' : ''} value="${String(v).replace(/"/g, '&quot;')}" class="w-full border rounded px-3 py-2">
+  </div>`;
+}
+
+async function deleteEmp(id) {
+  if (!confirm('ลบพนักงานคนนี้?')) return;
+  // Optimistic: remove from cache immediately
+  const backup = STATE.employees.slice();
+  STATE.employees = STATE.employees.filter(e => e.id !== id);
+  cacheSet('employees', STATE.employees);
+  filterEmployees();
+  try {
+    await api('deleteEmployee', { id });
+    toast('ลบแล้ว');
+  } catch (e) {
+    // Rollback
+    STATE.employees = backup;
+    cacheSet('employees', STATE.employees);
+    filterEmployees();
+    toast(e.message, 'err');
+  }
+}
+
+// ====================== BULK IMPORT EMPLOYEES ======================
+function openImportModal() {
+  modal(`
+    <div class="p-6">
+      <div class="flex justify-between items-center mb-4">
+        <h2 class="text-xl font-bold">📥 Import พนักงานจาก Excel</h2>
+        <button onclick="closeModal()" class="text-slate-400">✕</button>
+      </div>
+
+      <div class="bg-amber-50 border border-amber-200 p-4 rounded mb-4 text-sm">
+        <div class="font-semibold mb-2">วิธีใช้:</div>
+        <ol class="list-decimal list-inside space-y-1 text-slate-700">
+          <li>เปิด Excel → จัด columns ให้ตรงตามลำดับด้านล่าง (10 คอลัมน์)</li>
+          <li>Select ข้อมูลพนักงาน (เฉพาะแถว data ไม่ต้องเอา header) → <b>Ctrl+C</b></li>
+          <li>คลิกในกล่องด้านล่าง → <b>Ctrl+V</b></li>
+          <li>กด <b>Preview</b> ตรวจ → <b>Import ทั้งหมด</b></li>
+        </ol>
+        <div class="mt-3 text-xs bg-white p-2 rounded border border-amber-200">
+          <b>ลำดับคอลัมน์ (Tab-separated):</b>
+          <table class="mt-2 text-xs w-full">
+            <tr class="bg-amber-100">
+              <th class="px-1 py-0.5 text-left">1.ชื่อ</th>
+              <th class="px-1 py-0.5 text-left">2.ชื่อเล่น</th>
+              <th class="px-1 py-0.5 text-left">3.กลุ่ม</th>
+              <th class="px-1 py-0.5">4.โกดัง/วัน</th>
+              <th class="px-1 py-0.5">5.หน้างาน/วัน</th>
+              <th class="px-1 py-0.5">6.เงินเดือน</th>
+              <th class="px-1 py-0.5">7.ปกส.</th>
+              <th class="px-1 py-0.5">8.ปก.บริษัท</th>
+              <th class="px-1 py-0.5">9.ปก.สุขภาพ</th>
+              <th class="px-1 py-0.5">10.ทักษะ</th>
+            </tr>
+            <tr><td class="px-1">ศิวะดล</td><td></td><td>thai</td><td>300</td><td>650</td><td></td><td></td><td>250</td><td>600</td><td>6000</td></tr>
+            <tr><td class="px-1">KYAW THIKE</td><td>โจต๊ะ</td><td>foreign</td><td>300</td><td>650</td><td></td><td>450</td><td>250</td><td>250</td><td>500</td></tr>
+            <tr><td class="px-1">น้องเกล้า</td><td></td><td>monthly</td><td></td><td></td><td>7000</td><td></td><td></td><td></td><td></td></tr>
+          </table>
+          <div class="mt-2"><b>กลุ่ม:</b> ใส่ <code>thai</code> / <code>foreign</code> / <code>monthly</code> เท่านั้น | ค่าว่างให้เว้นไว้ (เคาะ Tab ผ่าน)</div>
+        </div>
+      </div>
+
+      <textarea id="importTextarea" class="w-full border rounded p-3 font-mono text-xs" rows="10" placeholder="Paste ข้อมูลที่นี่..."></textarea>
+
+      <label class="flex items-center gap-2 mt-3 text-sm">
+        <input type="checkbox" id="hasHeaderRow"> แถวแรกของที่ paste มาเป็น header (ไม่ import)
+      </label>
+
+      <div class="flex justify-end gap-2 mt-4">
+        <button onclick="closeModal()" class="px-4 py-2 border rounded">ยกเลิก</button>
+        <button onclick="previewImport()" class="px-4 py-2 bg-blue-600 text-white rounded">🔍 Preview</button>
+      </div>
+
+      <div id="importPreview" class="mt-4"></div>
+    </div>
+  `);
+}
+
+function previewImport() {
+  const text = document.getElementById('importTextarea').value;
+  const hasHeader = document.getElementById('hasHeaderRow').checked;
+  const lines = text.split(/\r?\n/).filter(r => r.trim());
+  if (!lines.length) { toast('ยังไม่มีข้อมูลให้ paste', 'err'); return; }
+  const rows = hasHeader ? lines.slice(1) : lines;
+
+  const parsed = rows.map((row, i) => {
+    const cols = row.split('\t');
+    const cleanNum = v => { const n = parseFloat((v || '').toString().replace(/,/g, '').trim()); return isFinite(n) ? n : 0; };
+    return {
+      _row: i + 1,
+      _raw: row,
+      name: (cols[0] || '').trim(),
+      nickname: (cols[1] || '').trim(),
+      group: (cols[2] || 'foreign').trim().toLowerCase(),
+      warehouse_rate: cleanNum(cols[3]),
+      field_rate: cleanNum(cols[4]),
+      monthly_salary: cleanNum(cols[5]),
+      social_security: cleanNum(cols[6]),
+      company_insurance: cleanNum(cols[7]),
+      health_insurance: cleanNum(cols[8]),
+      skill_bonus_default: cleanNum(cols[9]),
+      active: true,
+      note: ''
+    };
+  });
+
+  // Validate
+  const errors = [];
+  const valid = [];
+  parsed.forEach((p, i) => {
+    const rowNum = i + 1;
+    if (!p.name) { errors.push(`แถวที่ ${rowNum}: ไม่มีชื่อ`); return; }
+    if (!['thai', 'foreign', 'monthly'].includes(p.group)) {
+      errors.push(`แถวที่ ${rowNum} (${p.name}): กลุ่ม "${p.group}" ไม่ถูกต้อง — ต้องเป็น thai/foreign/monthly`);
+      return;
+    }
+    valid.push(p);
+  });
+
+  STATE._importData = valid;
+
+  const previewBox = document.getElementById('importPreview');
+  previewBox.innerHTML = `
+    <div class="border-t pt-4">
+      <div class="flex items-center justify-between mb-3">
+        <div class="font-semibold">📋 Preview (${valid.length} คน${errors.length ? ', ⚠ ข้าม ' + errors.length + ' แถว' : ''})</div>
+        ${valid.length ? '<span class="text-emerald-600 text-xs">✓ พร้อม import</span>' : ''}
+      </div>
+      ${errors.length ? `<div class="bg-red-50 border border-red-200 rounded p-3 text-xs text-red-700 mb-3 max-h-32 overflow-y-auto">${errors.join('<br>')}</div>` : ''}
+      ${valid.length ? `
+        <div class="overflow-x-auto max-h-80 border rounded">
+          <table class="w-full text-xs">
+            <thead class="bg-slate-100 sticky top-0">
+              <tr>
+                <th class="px-2 py-1 text-left">ชื่อ</th>
+                <th class="px-2 py-1 text-left">ชื่อเล่น</th>
+                <th class="px-2 py-1 text-left">กลุ่ม</th>
+                <th class="px-2 py-1 text-right">โกดัง/วัน</th>
+                <th class="px-2 py-1 text-right">หน้างาน/วัน</th>
+                <th class="px-2 py-1 text-right">เงินเดือน</th>
+                <th class="px-2 py-1 text-right">ปกส.</th>
+                <th class="px-2 py-1 text-right">ปก.บริษัท</th>
+                <th class="px-2 py-1 text-right">ปก.สุขภาพ</th>
+                <th class="px-2 py-1 text-right">ทักษะ</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${valid.map(p => `<tr class="border-t">
+                <td class="px-2 py-1 font-medium">${p.name}</td>
+                <td class="px-2 py-1 text-slate-500">${p.nickname || '-'}</td>
+                <td class="px-2 py-1"><span class="text-xs px-1.5 py-0.5 rounded ${groupBadge(p.group)}">${groupLabel(p.group)}</span></td>
+                <td class="px-2 py-1 num">${p.warehouse_rate || '-'}</td>
+                <td class="px-2 py-1 num">${p.field_rate || '-'}</td>
+                <td class="px-2 py-1 num">${p.monthly_salary || '-'}</td>
+                <td class="px-2 py-1 num">${p.social_security || '-'}</td>
+                <td class="px-2 py-1 num">${p.company_insurance || '-'}</td>
+                <td class="px-2 py-1 num">${p.health_insurance || '-'}</td>
+                <td class="px-2 py-1 num">${p.skill_bonus_default || '-'}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+        <div class="flex justify-end gap-2 mt-3">
+          <button onclick="executeImport()" id="importBtn" class="px-4 py-2 bg-emerald-600 text-white rounded hover:bg-emerald-700">📥 Import ทั้งหมด ${valid.length} คน</button>
+        </div>
+      ` : '<div class="text-slate-500 text-center py-4">ไม่มีข้อมูลที่ valid</div>'}
+    </div>
+  `;
+}
+
+async function executeImport() {
+  const data = STATE._importData;
+  if (!data || !data.length) { toast('ไม่มีข้อมูลให้ import', 'err'); return; }
+  const btn = document.getElementById('importBtn');
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> กำลัง import...';
+  try {
+    // ลบ field _row, _raw ก่อนส่ง
+    const clean = data.map(d => {
+      const o = Object.assign({}, d);
+      delete o._row; delete o._raw;
+      return o;
+    });
+    const result = await api('bulkSaveEmployees', { employees: clean });
+    toast(`Import สำเร็จ ${result.count} คน ✓`);
+    closeModal();
+    await refreshAll();
+  } catch (e) {
+    toast(e.message, 'err');
+    btn.disabled = false; btn.innerHTML = `📥 Import ทั้งหมด ${data.length} คน`;
+  }
+}
+
+// ====================== PERIODS ======================
+function renderPeriodsList() {
+  STATE.currentPeriod = null;
+  const root = document.getElementById('page-periods');
+  root.innerHTML = `
+    <div class="flex items-center justify-between mb-6">
+      <div>
+        <h1 class="text-2xl font-bold">งวดเงินเดือน</h1>
+        <p class="text-slate-500 text-sm">เปิดงวด → กรอกตัวเลข → บันทึก</p>
+      </div>
+      <button onclick="openPeriodModal()" class="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">+ สร้างงวดใหม่</button>
+    </div>
+    <div class="bg-white rounded-lg shadow-sm border overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-100 text-left text-xs">
+          <tr>
+            <th class="px-3 py-2">ชื่องวด</th>
+            <th class="px-3 py-2">ช่วงวันที่</th>
+            <th class="px-3 py-2">วันจ่าย</th>
+            <th class="px-3 py-2">สถานะ</th>
+            <th class="px-3 py-2"></th>
+          </tr>
+        </thead>
+        <tbody id="periodTbody"></tbody>
+      </table>
+    </div>
+  `;
+  const tbody = document.getElementById('periodTbody');
+  if (!STATE.periods.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="text-center py-8 text-slate-400">ยังไม่มีงวด — กด "+ สร้างงวดใหม่"</td></tr>';
+    return;
+  }
+  tbody.innerHTML = STATE.periods.map(p => `
+    <tr class="border-t hover:bg-slate-50">
+      <td class="px-3 py-2 font-medium">${p.label}</td>
+      <td class="px-3 py-2 text-slate-500">${p.start_date ? new Date(p.start_date).toLocaleDateString('th-TH') : '-'} → ${p.end_date ? new Date(p.end_date).toLocaleDateString('th-TH') : '-'}</td>
+      <td class="px-3 py-2">${p.pay_date ? new Date(p.pay_date).toLocaleDateString('th-TH') : '-'}</td>
+      <td class="px-3 py-2"><span class="text-xs px-2 py-0.5 rounded ${p.status === 'locked' ? 'bg-slate-200 text-slate-700' : 'bg-emerald-100 text-emerald-700'}">${p.status === 'locked' ? 'ปิดงวด' : 'เปิดอยู่'}</span></td>
+      <td class="px-3 py-2 text-right">
+        <button onclick="openPeriod('${p.id}')" class="text-blue-600 text-xs">เปิด</button>
+        <button onclick="deletePeriodConfirm('${p.id}')" class="text-red-600 text-xs ml-3">ลบ</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function openPeriodModal() {
+  const d = new Date();
+  const m = d.getMonth() + 1;
+  const y = (d.getFullYear() + 543).toString().slice(-2);
+  const months = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+  const half = d.getDate() <= 15 ? '1-15' : '16-สิ้นเดือน';
+  modal(`
+    <div class="p-6">
+      <div class="flex justify-between items-center mb-4">
+        <h2 class="text-xl font-bold">สร้างงวดเงินเดือน</h2>
+        <button onclick="closeModal()" class="text-slate-400">✕</button>
+      </div>
+      <form id="periodForm" class="space-y-4 text-sm">
+        ${field('label', 'ชื่องวด (เช่น "16-30 เม.ย. 69")', `${half} ${months[m-1]} ${y}`)}
+        <div class="grid grid-cols-3 gap-3">
+          ${field('start_date', 'วันที่เริ่ม', '', '', 'type=date required')}
+          ${field('end_date', 'วันที่สิ้นสุด', '', '', 'type=date required')}
+          ${field('pay_date', 'วันที่จ่าย', today(), '', 'type=date required')}
+        </div>
+        <div class="text-xs text-slate-500 bg-slate-50 p-3 rounded">
+          💡 เงินที่จ่ายวันที่ <b>5</b> = ช่วง 16 → สิ้นเดือนก่อนหน้า<br>
+          เงินที่จ่ายวันที่ <b>20</b> = ช่วง 1-15 ของเดือนนั้น
+        </div>
+        <div class="flex justify-end gap-2 pt-4 border-t">
+          <button type="button" onclick="closeModal()" class="px-4 py-2 border rounded">ยกเลิก</button>
+          <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded">สร้างงวด</button>
+        </div>
+      </form>
+    </div>
+  `);
+  document.getElementById('periodForm').addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const fd = new FormData(ev.target);
+    const obj = {}; fd.forEach((v, k) => obj[k] = v);
+    obj.status = 'open';
+    try {
+      const created = await api('savePeriod', { period: obj });
+      STATE.periods.unshift(created);
+      cacheSet('periods', STATE.periods);
+      toast('สร้างงวดแล้ว');
+      closeModal();
+      openPeriod(created.id);
+    } catch (e) { toast(e.message, 'err'); }
+  });
+}
+
+async function deletePeriodConfirm(id) {
+  if (!confirm('ลบงวดนี้พร้อมข้อมูลทั้งหมด?')) return;
+  const backup = STATE.periods.slice();
+  STATE.periods = STATE.periods.filter(p => p.id !== id);
+  cacheSet('periods', STATE.periods);
+  renderPeriodsList();
+  try {
+    await api('deletePeriod', { id });
+    toast('ลบแล้ว');
+  } catch (e) {
+    STATE.periods = backup;
+    cacheSet('periods', STATE.periods);
+    renderPeriodsList();
+    toast(e.message, 'err');
+  }
+}
+
+// ====================== PERIOD DETAIL (EDIT) ======================
+async function openPeriod(id) {
+  const period = STATE.periods.find(p => p.id === id);
+  if (!period) { toast('ไม่พบงวด', 'err'); return; }
+  showPage('periods');                  // ← ทำก่อน เพราะมันจะ reset currentPeriod
+  STATE.currentPeriod = period;          // ← ค่อย set หลัง showPage
+  const root = document.getElementById('page-periods');
+  root.innerHTML = '<div class="text-slate-500"><span class="spinner"></span> กำลังโหลด...</div>';
+  try {
+    const data = await api('getPeriodData', { period_id: id });
+    STATE.currentEntries = data.entries || [];
+    STATE.currentExtras = data.extras || [];
+    renderPeriodEdit();
+  } catch (e) { root.innerHTML = '<div class="text-red-600">' + e.message + '</div>'; }
+}
+
+function renderPeriodEdit() {
+  const p = STATE.currentPeriod;
+  const entryMap = {};
+  STATE.currentEntries.forEach(e => entryMap[e.employee_id] = e);
+
+  // Auto-populate จาก default ของพนักงานที่ active แต่ยังไม่มี entry
+  STATE.employees.forEach(emp => {
+    if (!isActive(emp)) return;
+    if (!entryMap[emp.id]) {
+      entryMap[emp.id] = makeDefaultEntry(emp, p.id);
+    }
+  });
+
+  const allEntries = STATE.employees
+    .filter(emp => entryMap[emp.id])
+    .map(emp => entryMap[emp.id]);
+
+  const byGroup = { thai: [], foreign: [], monthly: [] };
+  allEntries.forEach(e => {
+    const emp = STATE.employees.find(x => x.id === e.employee_id);
+    if (!emp) return;
+    (byGroup[emp.group] || byGroup.thai).push({ emp, entry: e });
+  });
+
+  const root = document.getElementById('page-periods');
+  root.innerHTML = `
+    <div class="flex items-center justify-between mb-4 no-print">
+      <div>
+        <button onclick="renderPeriodsList()" class="text-sm text-blue-600">← กลับ</button>
+        <h1 class="text-2xl font-bold mt-1">${p.label}</h1>
+        <p class="text-slate-500 text-sm">${p.start_date ? new Date(p.start_date).toLocaleDateString('th-TH') : ''} → ${p.end_date ? new Date(p.end_date).toLocaleDateString('th-TH') : ''} | จ่ายวันที่ ${p.pay_date ? new Date(p.pay_date).toLocaleDateString('th-TH') : ''}</p>
+      </div>
+      <div class="flex gap-2">
+        <button onclick="resetPeriodEntries()" class="px-3 py-2 border rounded text-sm">↻ รีเซ็ตจาก default</button>
+        <button onclick="savePeriodAll()" id="saveAllBtn" class="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">💾 บันทึกทั้งงวด</button>
+      </div>
+    </div>
+
+    <div id="periodEditRoot"></div>
+  `;
+
+  const editRoot = document.getElementById('periodEditRoot');
+  let html = '';
+  ['foreign', 'thai', 'monthly'].forEach(g => {
+    if (!byGroup[g].length) return;
+    html += `
+      <div class="bg-white rounded-lg shadow-sm border mb-6 overflow-x-auto">
+        <div class="px-4 py-3 border-b flex justify-between items-center">
+          <div class="font-semibold">${groupLabel(g)} <span class="text-slate-400 text-sm">(${byGroup[g].length} คน)</span></div>
+          <div class="text-sm text-slate-500">รวมสุทธิ: <b id="sum-${g}" class="text-blue-600">—</b></div>
+        </div>
+        <table class="ptbl text-sm" style="table-layout: fixed; min-width: 1800px;" data-group="${g}">
+          <thead>
+            <tr>
+              <th style="width:40px">#</th>
+              <th style="width:180px">ชื่อ</th>
+              <th style="width:70px">วันรวม</th>
+              <th style="width:70px">โกดัง วัน</th>
+              <th style="width:70px">โกดัง เรท</th>
+              <th style="width:85px">โกดัง ยอด</th>
+              <th style="width:75px">หน้างาน วัน</th>
+              <th style="width:75px">หน้างาน เรท</th>
+              <th style="width:85px">หน้างาน ยอด</th>
+              <th style="width:85px">รวม</th>
+              <th class="tint-green" style="width:90px">+ เงินพิเศษ</th>
+              <th class="tint-red"   style="width:90px">− ปก.บริษัท</th>
+              <th class="tint-red"   style="width:85px">− หักหยุด</th>
+              <th class="tint-red"   style="width:90px">− หักอื่นๆ</th>
+              <th class="tint-red"   style="width:75px">− ปกส.</th>
+              <th class="tint-red"   style="width:95px">− ปก.สุขภาพ</th>
+              <th class="tint-green" style="width:75px">+ ทักษะ</th>
+              <th class="bg-blue-50" style="width:95px">คงเหลือ</th>
+              <th style="width:160px">หมายเหตุ</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${byGroup[g].map((row, i) => entryRowHtml(row.emp, row.entry, i, g)).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  });
+
+  html += `
+    <div class="bg-white rounded-lg shadow-sm border mb-6 overflow-hidden">
+      <div class="px-4 py-3 border-b flex justify-between items-center">
+        <div class="font-semibold">ค่าใช้จ่ายอื่น/รายการหักท้ายงวด</div>
+        <button onclick="addExtra()" class="text-sm text-blue-600">+ เพิ่มรายการ</button>
+      </div>
+      <table class="w-full text-sm">
+        <thead class="bg-slate-100 text-xs text-left">
+          <tr>
+            <th class="px-3 py-2" style="min-width:240px">รายการ</th>
+            <th class="px-3 py-2 text-right" style="width:160px">จำนวนเงิน</th>
+            <th class="px-3 py-2" style="width:140px">ประเภท</th>
+            <th class="px-3 py-2">หมายเหตุ</th>
+            <th class="px-3 py-2" style="width:60px"></th>
+          </tr>
+        </thead>
+        <tbody id="extraTbody"></tbody>
+      </table>
+    </div>
+    <div class="bg-blue-50 border border-blue-200 rounded-lg p-5">
+      <div class="text-sm text-slate-600 mb-3 font-semibold">สรุปยอดงวดนี้</div>
+      <div id="periodSummary" class="text-sm space-y-1"></div>
+    </div>
+  `;
+  editRoot.innerHTML = html;
+  renderExtras();
+  recalcAll();
+}
+
+function makeDefaultEntry(emp, periodId) {
+  const isMonthly = emp.group === 'monthly';
+  return {
+    id: '',
+    period_id: periodId,
+    employee_id: emp.id,
+    days_total: '',
+    warehouse_days: '',                                     // ผู้ใช้กรอกในงวด
+    warehouse_rate: isMonthly ? '' : num(emp.warehouse_rate) || '',
+    warehouse_amount: '',
+    field_days: '',                                         // ผู้ใช้กรอกในงวด
+    field_rate: isMonthly ? '' : num(emp.field_rate) || '',
+    field_amount: '',
+    subtotal: isMonthly ? num(emp.monthly_salary) : '',
+    bonus: '',
+    company_insurance: num(emp.company_insurance) || '',
+    absent_deduction: '',
+    other_deduction: '',
+    other_deduction_note: '',
+    social_security: num(emp.social_security) || '',
+    health_insurance: num(emp.health_insurance) || '',
+    skill_bonus: num(emp.skill_bonus_default) || '',
+    net: '',
+    note: ''
+  };
+}
+
+function entryRowHtml(emp, entry, idx, group) {
+  const isMonthly = group === 'monthly';
+  return `
+    <tr data-emp="${emp.id}">
+      <td class="text-center text-slate-400 text-xs">${idx + 1}</td>
+      <td class="px-2 py-1">
+        <div class="font-medium">${emp.name || ''}</div>
+        ${emp.nickname ? `<div class="text-xs text-slate-400">${emp.nickname}</div>` : ''}
+      </td>
+      <td><input class="num" type="number" step="0.5" data-f="days_total" value="${entry.days_total ?? ''}" ${isMonthly ? 'disabled' : ''}></td>
+      <td><input class="num" type="number" step="0.5" data-f="warehouse_days" value="${entry.warehouse_days ?? ''}" ${isMonthly ? 'disabled' : ''}></td>
+      <td><input class="num" type="number" data-f="warehouse_rate" value="${entry.warehouse_rate ?? ''}" ${isMonthly ? 'disabled' : ''}></td>
+      <td><input class="num" data-f="warehouse_amount" value="${fmt(entry.warehouse_amount)}" readonly tabindex="-1"></td>
+      <td><input class="num" type="number" step="0.5" data-f="field_days" value="${entry.field_days ?? ''}" ${isMonthly ? 'disabled' : ''}></td>
+      <td><input class="num" type="number" data-f="field_rate" value="${entry.field_rate ?? ''}" ${isMonthly ? 'disabled' : ''}></td>
+      <td><input class="num" data-f="field_amount" value="${fmt(entry.field_amount)}" readonly tabindex="-1"></td>
+      <td><input class="num" type="number" data-f="subtotal" value="${entry.subtotal ?? ''}" ${isMonthly ? '' : 'readonly tabindex="-1"'}></td>
+      <td class="tint-green"><input class="num" type="number" data-f="bonus" value="${entry.bonus ?? ''}"></td>
+      <td class="tint-red"><input class="num" type="number" data-f="company_insurance" value="${entry.company_insurance ?? ''}"></td>
+      <td class="tint-red"><input class="num" type="number" data-f="absent_deduction" value="${entry.absent_deduction ?? ''}"></td>
+      <td class="tint-red"><input class="num" type="number" data-f="other_deduction" value="${entry.other_deduction ?? ''}"></td>
+      <td class="tint-red"><input class="num" type="number" data-f="social_security" value="${entry.social_security ?? ''}"></td>
+      <td class="tint-red"><input class="num" type="number" data-f="health_insurance" value="${entry.health_insurance ?? ''}"></td>
+      <td class="tint-green"><input class="num" type="number" data-f="skill_bonus" value="${entry.skill_bonus ?? ''}"></td>
+      <td class="bg-blue-50"><input class="num font-semibold text-blue-700" data-f="net" value="${fmt(entry.net)}" readonly tabindex="-1"></td>
+      <td><input data-f="note" value="${(entry.note || '').replace(/"/g,'&quot;')}"></td>
+    </tr>
+  `;
+}
+
+function recalcRow(tr) {
+  const isMonthly = tr.closest('table').dataset.group === 'monthly';
+  const get = f => num(tr.querySelector(`[data-f="${f}"]`).value);
+  if (!isMonthly) {
+    const wAmt = get('warehouse_days') * get('warehouse_rate');
+    const fAmt = get('field_days') * get('field_rate');
+    const sub = wAmt + fAmt;
+    tr.querySelector('[data-f=warehouse_amount]').value = fmt(wAmt);
+    tr.querySelector('[data-f=field_amount]').value = fmt(fAmt);
+    tr.querySelector('[data-f=subtotal]').value = sub;
+  }
+  const sub = get('subtotal');
+  const net = sub + get('bonus') + get('skill_bonus')
+            - get('company_insurance') - get('absent_deduction')
+            - get('other_deduction') - get('social_security') - get('health_insurance');
+  tr.querySelector('[data-f=net]').value = fmt(net);
+  tr.classList.toggle('row-warn', net < 0);
+}
+
+function recalcAll() {
+  document.querySelectorAll('table.ptbl').forEach(tbl => {
+    let sum = 0;
+    tbl.querySelectorAll('tbody tr').forEach(tr => {
+      recalcRow(tr);
+      sum += num(tr.querySelector('[data-f=net]').value.replace(/,/g, ''));
+    });
+    const sumEl = document.getElementById('sum-' + tbl.dataset.group);
+    if (sumEl) sumEl.textContent = fmt(sum) + ' บาท';
+  });
+  recalcSummary();
+}
+
+document.addEventListener('input', e => {
+  const tr = e.target.closest('table.ptbl tbody tr');
+  if (tr) recalcAll();
+});
+
+function recalcSummary() {
+  let totalNet = 0, totalCompIns = 0, totalSocial = 0, totalHealth = 0, totalAbsent = 0, totalOther = 0, totalBonus = 0;
+  document.querySelectorAll('table.ptbl tbody tr').forEach(tr => {
+    const get = f => num(tr.querySelector(`[data-f="${f}"]`).value.toString().replace(/,/g, ''));
+    totalNet += get('net');
+    totalCompIns += get('company_insurance');
+    totalSocial += get('social_security');
+    totalHealth += get('health_insurance');
+    totalAbsent += get('absent_deduction');
+    totalOther += get('other_deduction');
+    totalBonus += get('bonus');
+  });
+  let extrasTotal = 0;
+  document.querySelectorAll('#extraTbody tr').forEach(tr => {
+    const inp = tr.querySelector('[data-f=amount]');
+    if (inp) extrasTotal += num(inp.value);
+  });
+  const grand = totalNet + extrasTotal;
+  const summary = document.getElementById('periodSummary');
+  if (summary) summary.innerHTML = `
+    <div class="flex justify-between"><span>ยอดเงินเดือนสุทธิทั้งหมด:</span> <b>${fmt(totalNet)} บาท</b></div>
+    <div class="flex justify-between text-slate-500"><span>+ ค่าใช้จ่าย/หักท้ายงวด:</span> <span>${fmt(extrasTotal)} บาท</span></div>
+    <div class="flex justify-between border-t pt-2 mt-2 text-lg"><span>ยอดโอนทั้งหมด:</span> <b class="text-blue-700">${fmt(grand)} บาท</b></div>
+    <div class="grid grid-cols-3 gap-2 mt-3 pt-3 border-t text-xs text-slate-500">
+      <div>เงินพิเศษ: ${fmt(totalBonus)}</div>
+      <div>หัก ปก.บริษัท: ${fmt(totalCompIns)}</div>
+      <div>หัก ปกส.: ${fmt(totalSocial)}</div>
+      <div>หัก ปก.สุขภาพ: ${fmt(totalHealth)}</div>
+      <div>หักหยุดงาน: ${fmt(totalAbsent)}</div>
+      <div>หักอื่นๆ: ${fmt(totalOther)}</div>
+    </div>
+  `;
+}
+
+function renderExtras() {
+  const tbody = document.getElementById('extraTbody');
+  if (!tbody) return;
+  if (!STATE.currentExtras.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="text-center py-4 text-slate-400 text-xs">ยังไม่มีรายการ</td></tr>';
+    return;
+  }
+  tbody.innerHTML = STATE.currentExtras.map((x, i) => `
+    <tr class="border-t">
+      <td class="px-3 py-1"><input data-f="label" data-i="${i}" value="${(x.label || '').replace(/"/g,'&quot;')}" class="w-full px-2 py-1 border rounded"></td>
+      <td class="px-3 py-1"><input data-f="amount" data-i="${i}" type="number" value="${x.amount ?? ''}" class="w-full px-2 py-1 border rounded num"></td>
+      <td class="px-3 py-1">
+        <select data-f="type" data-i="${i}" class="w-full px-2 py-1 border rounded">
+          <option value="expense" ${x.type === 'expense' ? 'selected' : ''}>ค่าใช้จ่าย</option>
+          <option value="deduction" ${x.type === 'deduction' ? 'selected' : ''}>หัก</option>
+        </select>
+      </td>
+      <td class="px-3 py-1"><input data-f="note" data-i="${i}" value="${(x.note || '').replace(/"/g,'&quot;')}" class="w-full px-2 py-1 border rounded"></td>
+      <td class="text-center"><button onclick="removeExtra(${i})" class="text-red-600 text-xs">ลบ</button></td>
+    </tr>
+  `).join('');
+  tbody.querySelectorAll('input, select').forEach(el => {
+    el.addEventListener('input', () => {
+      const i = +el.dataset.i, f = el.dataset.f;
+      STATE.currentExtras[i][f] = (f === 'amount') ? num(el.value) : el.value;
+      recalcSummary();
+    });
+  });
+}
+
+function addExtra() {
+  STATE.currentExtras.push({ label: '', amount: 0, type: 'expense', note: '' });
+  renderExtras();
+}
+function removeExtra(i) {
+  STATE.currentExtras.splice(i, 1);
+  renderExtras();
+  recalcSummary();
+}
+
+function resetPeriodEntries() {
+  if (!confirm('รีเซ็ตค่าทั้งหมดกลับเป็น default? (จะไม่บันทึกจนกว่าจะกด "บันทึกทั้งงวด")')) return;
+  STATE.currentEntries = [];
+  renderPeriodEdit();
+}
+
+async function savePeriodAll() {
+  const btn = document.getElementById('saveAllBtn');
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> กำลังบันทึก...';
+  try {
+    const entries = [];
+    document.querySelectorAll('table.ptbl tbody tr').forEach(tr => {
+      const empId = tr.dataset.emp;
+      const e = { employee_id: empId };
+      tr.querySelectorAll('[data-f]').forEach(el => {
+        const f = el.dataset.f;
+        const val = el.value.toString().replace(/,/g, '');
+        if (['note', 'other_deduction_note'].includes(f)) {
+          e[f] = el.value;
+        } else {
+          e[f] = val === '' ? '' : num(val);
+        }
+      });
+      const hasData = num(e.subtotal) || num(e.bonus) || num(e.warehouse_amount) || num(e.field_amount) || e.note;
+      if (hasData) entries.push(e);
+    });
+    // savePeriodAll endpoint รวม entries+extras ใน 1 call
+    await api('savePeriodAll', { period_id: STATE.currentPeriod.id, entries, extras: STATE.currentExtras });
+    toast('บันทึกแล้ว ✓');
+    btn.innerHTML = '💾 บันทึกทั้งงวด';
+    btn.disabled = false;
+  } catch (e) {
+    toast(e.message, 'err');
+    btn.innerHTML = '💾 บันทึกทั้งงวด';
+    btn.disabled = false;
+  }
+}
+
+// ====================== REPORTS ======================
+function renderReports() {
+  const root = document.getElementById('page-reports');
+  root.innerHTML = `
+    <div class="mb-6">
+      <h1 class="text-2xl font-bold">รายงาน</h1>
+      <p class="text-slate-500 text-sm">เลือกงวดเพื่อสร้างรายงาน</p>
+    </div>
+    <div class="bg-white rounded-lg shadow-sm border p-5 mb-6 no-print">
+      <div class="flex gap-3 items-end">
+        <div class="flex-1">
+          <label class="block text-xs text-slate-500 mb-1">งวด</label>
+          <select id="reportPeriod" class="w-full border rounded px-3 py-2">
+            ${STATE.periods.map(p => `<option value="${p.id}">${p.label}</option>`).join('')}
+          </select>
+        </div>
+        <button onclick="loadReport()" class="bg-blue-600 text-white px-4 py-2 rounded">โหลดข้อมูล</button>
+      </div>
+    </div>
+    <div id="reportContent"></div>
+  `;
+}
+
+async function loadReport() {
+  const id = document.getElementById('reportPeriod').value;
+  const period = STATE.periods.find(p => p.id === id);
+  const root = document.getElementById('reportContent');
+  root.innerHTML = '<div class="text-slate-500"><span class="spinner"></span> กำลังโหลด...</div>';
+  const data = await api('getPeriodData', { period_id: id });
+  const entries = (data.entries || []).filter(e => num(e.net) !== 0 || num(e.subtotal) !== 0);
+  const extras = data.extras || [];
+  const totalNet = entries.reduce((s, e) => s + num(e.net), 0);
+  const totalExtras = extras.reduce((s, e) => s + num(e.amount), 0);
+  const grand = totalNet + totalExtras;
+
+  root.innerHTML = `
+    <div class="bg-white rounded-lg shadow-sm border mb-6 no-print">
+      <div class="p-5 border-b flex justify-between items-center">
+        <div>
+          <div class="font-bold text-lg">${period.label}</div>
+          <div class="text-sm text-slate-500">${period.start_date ? new Date(period.start_date).toLocaleDateString('th-TH') : ''} → ${period.end_date ? new Date(period.end_date).toLocaleDateString('th-TH') : ''}</div>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="exportExcel()" class="bg-emerald-600 text-white px-3 py-2 rounded text-sm">📊 Export Excel</button>
+          <button onclick="renderSlips()" class="bg-blue-600 text-white px-3 py-2 rounded text-sm">📄 สร้างสลิปรายคน</button>
+          <button onclick="window.print()" class="bg-slate-600 text-white px-3 py-2 rounded text-sm">🖨 พิมพ์</button>
+        </div>
+      </div>
+      <div class="p-5 grid grid-cols-3 gap-4">
+        <div>
+          <div class="text-xs text-slate-500">จำนวนพนักงานในงวด</div>
+          <div class="text-xl font-bold">${entries.length}</div>
+        </div>
+        <div>
+          <div class="text-xs text-slate-500">ยอดเงินเดือนสุทธิ</div>
+          <div class="text-xl font-bold text-emerald-700">${fmt(totalNet)}</div>
+        </div>
+        <div>
+          <div class="text-xs text-slate-500">ยอดโอนทั้งหมด</div>
+          <div class="text-2xl font-bold text-blue-700">${fmt(grand)}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="bg-white rounded-lg shadow-sm border overflow-hidden">
+      <div class="p-4 border-b font-semibold">รายละเอียดเงินเดือน</div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="bg-slate-100">
+            <tr>
+              <th class="px-2 py-2 text-left">ชื่อ</th>
+              <th class="px-2 py-2 num">วันรวม</th>
+              <th class="px-2 py-2 num">รวม</th>
+              <th class="px-2 py-2 num">เงินพิเศษ</th>
+              <th class="px-2 py-2 num">หักรวม</th>
+              <th class="px-2 py-2 num">ทักษะ</th>
+              <th class="px-2 py-2 num bg-blue-50">คงเหลือ</th>
+              <th class="px-2 py-2 text-left">หมายเหตุ</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${entries.map(e => {
+              const emp = STATE.employees.find(x => x.id === e.employee_id);
+              const deductions = num(e.company_insurance) + num(e.absent_deduction) + num(e.other_deduction) + num(e.social_security) + num(e.health_insurance);
+              return `<tr class="border-t">
+                <td class="px-2 py-1">${emp ? (emp.name + (emp.nickname ? ' ('+emp.nickname+')' : '')) : '?'}</td>
+                <td class="px-2 py-1 num">${fmt(e.days_total)}</td>
+                <td class="px-2 py-1 num">${fmt(e.subtotal)}</td>
+                <td class="px-2 py-1 num">${fmt(e.bonus)}</td>
+                <td class="px-2 py-1 num text-red-600">${fmt(deductions)}</td>
+                <td class="px-2 py-1 num">${fmt(e.skill_bonus)}</td>
+                <td class="px-2 py-1 num bg-blue-50 font-semibold">${fmt(e.net)}</td>
+                <td class="px-2 py-1 text-slate-500">${e.note || ''}</td>
+              </tr>`;
+            }).join('')}
+            <tr class="border-t-2 bg-slate-50 font-semibold">
+              <td class="px-2 py-2">รวม</td>
+              <td colspan="5"></td>
+              <td class="px-2 py-2 num bg-blue-100">${fmt(totalNet)}</td>
+              <td></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    ${extras.length ? `
+    <div class="bg-white rounded-lg shadow-sm border mt-6 overflow-hidden">
+      <div class="p-4 border-b font-semibold">ค่าใช้จ่าย/รายการหักท้ายงวด</div>
+      <table class="w-full text-sm">
+        <thead class="bg-slate-100 text-xs">
+          <tr><th class="px-3 py-2 text-left">รายการ</th><th class="px-3 py-2 num">จำนวน</th><th class="px-3 py-2 text-left">ประเภท</th><th class="px-3 py-2 text-left">หมายเหตุ</th></tr>
+        </thead>
+        <tbody>
+          ${extras.map(x => `<tr class="border-t">
+            <td class="px-3 py-2">${x.label || ''}</td>
+            <td class="px-3 py-2 num">${fmt(x.amount)}</td>
+            <td class="px-3 py-2"><span class="text-xs px-2 py-0.5 rounded ${x.type === 'deduction' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}">${x.type === 'deduction' ? 'หัก' : 'ค่าใช้จ่าย'}</span></td>
+            <td class="px-3 py-2 text-slate-500">${x.note || ''}</td>
+          </tr>`).join('')}
+          <tr class="border-t-2 bg-slate-50 font-semibold"><td class="px-3 py-2">รวม</td><td class="px-3 py-2 num">${fmt(totalExtras)}</td><td colspan="2"></td></tr>
+        </tbody>
+      </table>
+    </div>` : ''}
+
+    <div class="bg-blue-600 text-white rounded-lg p-6 mt-6 text-center">
+      <div class="text-sm opacity-80">สรุปยอดสำหรับโอน — ${period.label}</div>
+      <div class="text-4xl font-bold mt-2">${fmt(grand)} บาท</div>
+      <div class="text-sm opacity-80 mt-2">เงินเดือน ${fmt(totalNet)} + ค่าใช้จ่าย ${fmt(totalExtras)}</div>
+    </div>
+  `;
+
+  STATE._currentReport = { period, entries, extras, totalNet, totalExtras, grand };
+}
+
+function exportExcel() {
+  const r = STATE._currentReport;
+  if (!r) return toast('โหลดข้อมูลก่อน', 'err');
+  const wb = XLSX.utils.book_new();
+
+  const detailHeaders = ['ลำดับ', 'ชื่อ', 'ชื่อเล่น', 'กลุ่ม', 'วันรวม',
+    'โกดัง วัน', 'เรท', 'ยอด',
+    'หน้างาน วัน', 'เรท', 'ยอด',
+    'รวม', 'เงินพิเศษ', 'ปก.บริษัท', 'หักหยุดงาน', 'หักอื่นๆ',
+    'ปกส.', 'ปก.สุขภาพ', 'ทักษะพิเศษ', 'คงเหลือ', 'หมายเหตุ'];
+  const detailRows = r.entries.map((e, i) => {
+    const emp = STATE.employees.find(x => x.id === e.employee_id) || {};
+    return [
+      i + 1, emp.name || '', emp.nickname || '', groupLabel(emp.group),
+      num(e.days_total),
+      num(e.warehouse_days), num(e.warehouse_rate), num(e.warehouse_amount),
+      num(e.field_days), num(e.field_rate), num(e.field_amount),
+      num(e.subtotal), num(e.bonus),
+      num(e.company_insurance), num(e.absent_deduction), num(e.other_deduction),
+      num(e.social_security), num(e.health_insurance), num(e.skill_bonus),
+      num(e.net), e.note || ''
+    ];
+  });
+  const sumCols = [11, 12, 13, 14, 15, 16, 17, 18, 19];
+  const totals = ['', 'รวม', '', '', ''];
+  for (let c = 5; c < detailHeaders.length - 1; c++) {
+    if (sumCols.includes(c)) {
+      totals.push(detailRows.reduce((s, row) => s + (Number(row[c]) || 0), 0));
+    } else {
+      totals.push('');
+    }
+  }
+  totals.push('');
+  const ws1 = XLSX.utils.aoa_to_sheet([detailHeaders, ...detailRows, totals]);
+  ws1['!cols'] = detailHeaders.map((h, i) => ({ wch: i === 1 ? 28 : i === 2 ? 14 : i === 20 ? 30 : 10 }));
+  XLSX.utils.book_append_sheet(wb, ws1, 'รายละเอียด');
+
+  if (r.extras.length) {
+    const exRows = r.extras.map(x => [x.label, num(x.amount), x.type === 'deduction' ? 'หัก' : 'ค่าใช้จ่าย', x.note || '']);
+    exRows.push(['รวม', r.totalExtras, '', '']);
+    const ws2 = XLSX.utils.aoa_to_sheet([['รายการ', 'จำนวน', 'ประเภท', 'หมายเหตุ'], ...exRows]);
+    ws2['!cols'] = [{ wch: 32 }, { wch: 14 }, { wch: 14 }, { wch: 30 }];
+    XLSX.utils.book_append_sheet(wb, ws2, 'ค่าใช้จ่ายอื่น');
+  }
+
+  const summary = [
+    ['สรุปงวด', r.period.label],
+    ['ช่วงวันที่', `${r.period.start_date || ''} ถึง ${r.period.end_date || ''}`],
+    ['วันที่จ่าย', r.period.pay_date || ''],
+    [],
+    ['จำนวนพนักงาน', r.entries.length],
+    ['ยอดเงินเดือนสุทธิ', r.totalNet],
+    ['ค่าใช้จ่าย/หักท้ายงวด', r.totalExtras],
+    ['ยอดโอนทั้งหมด', r.grand]
+  ];
+  const ws3 = XLSX.utils.aoa_to_sheet(summary);
+  ws3['!cols'] = [{ wch: 24 }, { wch: 30 }];
+  XLSX.utils.book_append_sheet(wb, ws3, 'สรุป');
+
+  XLSX.writeFile(wb, `Payroll_${r.period.label.replace(/[\s\/]/g, '_')}.xlsx`);
+  toast('ส่งออก Excel แล้ว');
+}
+
+function renderSlips() {
+  const r = STATE._currentReport;
+  if (!r) return;
+  const root = document.getElementById('reportContent');
+  root.innerHTML = `
+    <div class="no-print mb-4 flex gap-2">
+      <button onclick="loadReport()" class="px-3 py-2 border rounded">← กลับ</button>
+      <button onclick="window.print()" class="bg-blue-600 text-white px-4 py-2 rounded">🖨 พิมพ์ทั้งหมด (PDF)</button>
+    </div>
+    <div>
+      ${r.entries.map(e => slipHtml(e, r.period)).join('')}
+    </div>
+  `;
+}
+
+function slipHtml(e, period) {
+  const emp = STATE.employees.find(x => x.id === e.employee_id) || {};
+  const earnings = [
+    ['ค่าแรงโกดัง', num(e.warehouse_days) + ' วัน × ' + fmt(e.warehouse_rate), num(e.warehouse_amount)],
+    ['ค่าแรงหน้างาน', num(e.field_days) + ' วัน × ' + fmt(e.field_rate), num(e.field_amount)],
+    ['เงินพิเศษ', '', num(e.bonus)],
+    ['ค่าทักษะพิเศษ', '', num(e.skill_bonus)]
+  ].filter(r => num(r[2]) !== 0);
+  const deductions = [
+    ['ประกันบริษัท', num(e.company_insurance)],
+    ['หักหยุดงานไม่แจ้ง', num(e.absent_deduction)],
+    ['หักอื่นๆ ' + (e.other_deduction_note ? '('+e.other_deduction_note+')' : ''), num(e.other_deduction)],
+    ['ประกันสังคม', num(e.social_security)],
+    ['ประกันสุขภาพ', num(e.health_insurance)]
+  ].filter(r => num(r[1]) !== 0);
+  const totalEarn = earnings.reduce((s,r) => s + num(r[2]), 0);
+  const totalDed  = deductions.reduce((s,r) => s + num(r[1]), 0);
+
+  return `<div class="slip">
+    <div class="flex justify-between border-b pb-3 mb-3">
+      <div>
+        <div class="text-lg font-bold">สลิปเงินเดือน</div>
+        <div class="text-sm text-slate-600">งวด: ${period.label}</div>
+        <div class="text-xs text-slate-500">วันที่จ่าย: ${period.pay_date ? new Date(period.pay_date).toLocaleDateString('th-TH') : '-'}</div>
+      </div>
+      <div class="text-right">
+        <div class="font-semibold">${emp.name || ''}</div>
+        ${emp.nickname ? `<div class="text-sm text-slate-500">${emp.nickname}</div>` : ''}
+        <div class="text-xs text-slate-400">${groupLabel(emp.group)}</div>
+      </div>
+    </div>
+    <div class="grid grid-cols-2 gap-6 text-sm">
+      <div>
+        <div class="font-semibold text-emerald-700 mb-2">รายรับ</div>
+        <table class="w-full text-xs">
+          ${earnings.map(r => `<tr><td class="py-1">${r[0]}</td><td class="text-slate-500">${r[1]}</td><td class="num py-1">${fmt(r[2])}</td></tr>`).join('')}
+          <tr class="border-t font-semibold"><td class="py-1">รวมรายรับ</td><td></td><td class="num">${fmt(totalEarn)}</td></tr>
+        </table>
+      </div>
+      <div>
+        <div class="font-semibold text-red-700 mb-2">รายการหัก</div>
+        <table class="w-full text-xs">
+          ${deductions.length ? deductions.map(r => `<tr><td class="py-1">${r[0]}</td><td class="num py-1">${fmt(r[1])}</td></tr>`).join('') : '<tr><td colspan="2" class="text-slate-400 text-center py-2">-</td></tr>'}
+          <tr class="border-t font-semibold"><td class="py-1">รวมรายการหัก</td><td class="num">${fmt(totalDed)}</td></tr>
+        </table>
+      </div>
+    </div>
+    <div class="border-t mt-4 pt-4 flex justify-between items-center bg-blue-50 -mx-6 -mb-6 px-6 py-4 rounded-b">
+      <div class="font-bold">เงินสุทธิที่ได้รับ</div>
+      <div class="text-2xl font-bold text-blue-700">${fmt(e.net)} บาท</div>
+    </div>
+    ${e.note ? `<div class="text-xs text-slate-500 mt-3">หมายเหตุ: ${e.note}</div>` : ''}
+  </div>`;
+}
+
+// ====================== SETTINGS ======================
+function renderSettings() {
+  const root = document.getElementById('page-settings');
+  root.innerHTML = `
+    <div class="mb-6">
+      <h1 class="text-2xl font-bold">ตั้งค่า</h1>
+      <p class="text-slate-500 text-sm">เชื่อมต่อกับ Google Apps Script Web App</p>
+    </div>
+    <div class="bg-white rounded-lg shadow-sm border p-6 max-w-3xl space-y-3">
+      <div>
+        <label class="block text-sm font-medium mb-2">Google Apps Script Web App URL</label>
+        <input id="webAppInput" value="${STATE.webAppUrl}" placeholder="https://script.google.com/macros/s/.../exec" class="w-full border rounded px-3 py-2 text-sm font-mono">
+      </div>
+      <div>
+        <label class="block text-sm font-medium mb-2">PIN (รหัสป้องกัน — ไม่บังคับ แต่แนะนำ)</label>
+        <input id="pinInput" type="password" value="${STATE.appPin}" placeholder="ตั้งให้ตรงกับ APP_PIN ใน Code.gs (ปล่อยว่างก็ได้)" class="w-full border rounded px-3 py-2 text-sm font-mono">
+        <div class="text-xs text-slate-500 mt-1">ถ้าตั้ง PIN ใน Code.gs ต้องใส่ที่นี่ตรงกัน — ไม่งั้น API จะปฏิเสธ</div>
+      </div>
+      <div class="flex gap-2 pt-2">
+        <button onclick="saveSettings()" class="bg-blue-600 text-white px-4 py-2 rounded text-sm">บันทึก</button>
+        <button onclick="testConnection()" class="border px-4 py-2 rounded text-sm">🔌 ทดสอบเชื่อมต่อ</button>
+        <button onclick="runSetup()" class="border px-4 py-2 rounded text-sm">🛠 สร้าง Sheet เริ่มต้น</button>
+        <button onclick="cacheClear(); toast('ล้าง cache แล้ว'); refreshAll()" class="border px-4 py-2 rounded text-sm text-slate-500">🧹 ล้าง cache</button>
+      </div>
+      <div id="connTest" class="text-sm"></div>
+    </div>
+
+    <div class="bg-amber-50 border border-amber-200 rounded-lg p-6 mt-6 max-w-3xl">
+      <div class="font-semibold mb-2">📖 วิธี Setup</div>
+      <ol class="text-sm space-y-2 list-decimal list-inside text-slate-700">
+        <li>สร้าง Google Sheet ใหม่ (เช่น "Payroll DB")</li>
+        <li>เปิด <b>Extensions → Apps Script</b></li>
+        <li>วางโค้ดจากไฟล์ <code class="bg-amber-100 px-1 rounded">Code.gs</code> ทั้งหมด</li>
+        <li>ที่บรรทัดบนสุดแก้ <code class="bg-amber-100 px-1 rounded">const APP_PIN = '';</code> เป็น PIN ที่ต้องการ (เช่น <code>'mypin1234'</code>) เพื่อกันคนอื่นเรียก API → 💾 Save</li>
+        <li>กด <b>Deploy → New deployment</b> → Type: <b>Web app</b> → Execute as: <b>Me</b> → Access: <b>Anyone</b> → Deploy</li>
+        <li>Copy URL ที่ลงท้าย <code>/exec</code> → วางช่องบน → ใส่ PIN ที่ตั้งไว้ในช่องล่าง → กด "บันทึก"</li>
+        <li>กด "ทดสอบเชื่อมต่อ" → ถ้าเขียว ✓ พร้อมใช้งาน</li>
+        <li>กด "สร้าง Sheet เริ่มต้น" (ครั้งแรก) เพื่อสร้าง 4 sheet</li>
+      </ol>
+      <div class="text-xs text-emerald-700 mt-3 pt-3 border-t border-amber-200">
+        ⚡ <b>เพิ่มความเร็ว:</b> ระบบเก็บ cache employees + periods ใน browser → โหลดทันที + refresh หลังจากนั้น
+      </div>
+    </div>
+
+    <div class="bg-slate-50 border rounded-lg p-6 mt-6 max-w-3xl">
+      <div class="font-semibold mb-2">💾 Backup</div>
+      <p class="text-xs text-slate-500 mb-3">ข้อมูลอยู่ใน Google Sheet ของคุณ — เปิด Sheet เพื่อ download .xlsx ได้ตลอด</p>
+      <button onclick="exportAllJSON()" class="border px-4 py-2 rounded text-sm">⬇ Export ทั้งหมด (JSON)</button>
+    </div>
+  `;
+}
+
+function saveSettings() {
+  const url = document.getElementById('webAppInput').value.trim();
+  const pin = document.getElementById('pinInput').value.trim();
+  STATE.webAppUrl = url;
+  STATE.appPin = pin;
+  localStorage.setItem('payroll.webAppUrl', url);
+  localStorage.setItem('payroll.appPin', pin);
+  toast('บันทึกแล้ว');
+  refreshAll();
+}
+
+async function testConnection() {
+  const out = document.getElementById('connTest');
+  out.innerHTML = '<span class="spinner"></span> กำลังทดสอบ...';
+  try {
+    const r = await api('ping');
+    out.innerHTML = '<span class="text-emerald-600">✓ เชื่อมต่อสำเร็จ — ' + ((r && r.msg) || 'OK') + '</span>';
+    document.getElementById('connStatus').innerHTML = '🟢 เชื่อมต่อแล้ว';
+  } catch (e) {
+    out.innerHTML = '<span class="text-red-600">✗ ' + e.message + '</span>';
+  }
+}
+
+async function runSetup() {
+  try {
+    await api('setup');
+    toast('สร้าง Sheet สำเร็จ');
+    refreshAll();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+async function exportAllJSON() {
+  try {
+    const emps = await api('listEmployees');
+    const pers = await api('listPeriods');
+    const allData = { exported_at: new Date(), employees: emps, periods: pers, period_data: {} };
+    for (const p of pers) {
+      allData.period_data[p.id] = await api('getPeriodData', { period_id: p.id });
+    }
+    const blob = new Blob([JSON.stringify(allData, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'payroll_backup_' + today() + '.json';
+    a.click();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+// ====================== INIT ======================
+loadFromCache();         // 1) แสดง cache instantly
+showPage('dashboard');   // 2) render หน้าด้วย cache
+if (STATE.webAppUrl) refreshAll(true); // 3) refresh in background (silent)
+</script>
+</body>
+</html>
