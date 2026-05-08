@@ -10,21 +10,21 @@
 <style>
   body { font-family: 'IBM Plex Sans Thai', system-ui, sans-serif; }
   .num { text-align: right; font-variant-numeric: tabular-nums; }
-  table.grid input { width: 100%; padding: 4px 6px; border: 1px solid transparent; border-radius: 4px; background: transparent; }
-  table.grid input:focus { outline: none; border-color: #3b82f6; background: white; }
-  table.grid input.num { text-align: right; }
-  table.grid td { padding: 0; border: 1px solid #e5e7eb; }
-  table.grid th { padding: 6px 8px; background: #f3f4f6; border: 1px solid #d1d5db; font-weight: 600; font-size: 12px; }
-  table.grid tr:hover td { background: #fafafa; }
-  table.grid tr.row-warn td { background: #fef9c3; }
-  table.grid tr.row-warn:hover td { background: #fef08a; }
+  table.ptbl input { width: 100%; padding: 4px 6px; border: 1px solid transparent; border-radius: 4px; background: transparent; }
+  table.ptbl input:focus { outline: none; border-color: #3b82f6; background: white; }
+  table.ptbl input.num { text-align: right; }
+  table.ptbl td { padding: 0; border: 1px solid #e5e7eb; }
+  table.ptbl th { padding: 6px 8px; background: #f3f4f6; border: 1px solid #d1d5db; font-weight: 600; font-size: 12px; }
+  table.ptbl tr:hover td { background: #fafafa; }
+  table.ptbl tr.row-warn td { background: #fef9c3; }
+  table.ptbl tr.row-warn:hover td { background: #fef08a; }
   /* Income / Deduction tint */
-  table.grid th.tint-green { background: #d1fae5 !important; color: #065f46; }
-  table.grid th.tint-red   { background: #fee2e2 !important; color: #991b1b; }
-  table.grid td.tint-green { background: #ecfdf5 !important; }
-  table.grid td.tint-red   { background: #fef2f2 !important; }
-  table.grid tr:hover td.tint-green { background: #d1fae5 !important; }
-  table.grid tr:hover td.tint-red   { background: #fee2e2 !important; }
+  table.ptbl th.tint-green { background: #d1fae5 !important; color: #065f46; }
+  table.ptbl th.tint-red   { background: #fee2e2 !important; color: #991b1b; }
+  table.ptbl td.tint-green { background: #ecfdf5 !important; }
+  table.ptbl td.tint-red   { background: #fef2f2 !important; }
+  table.ptbl tr:hover td.tint-green { background: #d1fae5 !important; }
+  table.ptbl tr:hover td.tint-red   { background: #fee2e2 !important; }
   .toast { position: fixed; bottom: 20px; right: 20px; padding: 12px 20px; border-radius: 8px; color: white; z-index: 9999; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
   .toast-ok { background: #10b981; }
   .toast-err { background: #ef4444; }
@@ -681,7 +681,7 @@ function renderPeriodEdit() {
           <div class="font-semibold">${groupLabel(g)} <span class="text-slate-400 text-sm">(${byGroup[g].length} คน)</span></div>
           <div class="text-sm text-slate-500">รวมสุทธิ: <b id="sum-${g}" class="text-blue-600">—</b></div>
         </div>
-        <table class="grid text-sm" style="table-layout: fixed; min-width: 1800px;" data-group="${g}">
+        <table class="ptbl text-sm" style="table-layout: fixed; min-width: 1800px;" data-group="${g}">
           <thead>
             <tr>
               <th style="width:40px">#</th>
@@ -819,7 +819,7 @@ function recalcRow(tr) {
 }
 
 function recalcAll() {
-  document.querySelectorAll('table.grid').forEach(tbl => {
+  document.querySelectorAll('table.ptbl').forEach(tbl => {
     let sum = 0;
     tbl.querySelectorAll('tbody tr').forEach(tr => {
       recalcRow(tr);
@@ -832,13 +832,13 @@ function recalcAll() {
 }
 
 document.addEventListener('input', e => {
-  const tr = e.target.closest('table.grid tbody tr');
+  const tr = e.target.closest('table.ptbl tbody tr');
   if (tr) recalcAll();
 });
 
 function recalcSummary() {
   let totalNet = 0, totalCompIns = 0, totalSocial = 0, totalHealth = 0, totalAbsent = 0, totalOther = 0, totalBonus = 0;
-  document.querySelectorAll('table.grid tbody tr').forEach(tr => {
+  document.querySelectorAll('table.ptbl tbody tr').forEach(tr => {
     const get = f => num(tr.querySelector(`[data-f="${f}"]`).value.toString().replace(/,/g, ''));
     totalNet += get('net');
     totalCompIns += get('company_insurance');
@@ -921,7 +921,7 @@ async function savePeriodAll() {
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> กำลังบันทึก...';
   try {
     const entries = [];
-    document.querySelectorAll('table.grid tbody tr').forEach(tr => {
+    document.querySelectorAll('table.ptbl tbody tr').forEach(tr => {
       const empId = tr.dataset.emp;
       const e = { employee_id: empId };
       tr.querySelectorAll('[data-f]').forEach(el => {
